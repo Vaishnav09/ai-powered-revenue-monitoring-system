@@ -1,0 +1,307 @@
+{
+  "name": "AI-Powered Revenue Drop Detection Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -144
+      ],
+      "id": "d83e6b2b-a310-4a62-8fec-6e607a0419ce",
+      "name": "Manual Trigger (Test Run)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH daily AS (\n    SELECT\n        ORDER_DATE,\n        SUM(AMOUNT) AS revenue\n    FROM ANALYTICS.DBT_VMULAY.V_FCT_ORDERS_DEMO_SEGMENTED\n    GROUP BY ORDER_DATE\n),\nranked AS (\n    SELECT\n        ORDER_DATE,\n        revenue,\n        ROW_NUMBER() OVER (ORDER BY ORDER_DATE DESC) AS rn\n    FROM daily\n),\ntoday AS (\n    SELECT\n        ORDER_DATE AS latest_date,\n        revenue AS today_revenue\n    FROM ranked\n    WHERE rn = 1\n),\nbaseline AS (\n    SELECT\n        AVG(revenue) AS avg_last_7_days\n    FROM ranked\n    WHERE rn BETWEEN 2 AND 8\n)\nSELECT\n    t.latest_date,\n    t.today_revenue,\n    b.avg_last_7_days,\n    ROUND((t.today_revenue - b.avg_last_7_days) / NULLIF(b.avg_last_7_days, 0), 4) AS drop_pct,\n    CASE\n        WHEN (t.today_revenue - b.avg_last_7_days) / NULLIF(b.avg_last_7_days, 0) <= -0.15 THEN TRUE\n        ELSE FALSE\n    END AS alert_triggered\nFROM today t\nCROSS JOIN baseline b;"
+      },
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -144
+      ],
+      "id": "d26c89ba-92ff-4e12-8ed5-7dd5fc59dc49",
+      "name": "Fetch Daily Revenue Metrics",
+      "credentials": {
+        "snowflake": {
+          "id": "uYJOMoG0l0oPFg0x",
+          "name": "Snowflake account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ac95845f-d670-4204-8128-f70ec09d01fa",
+              "leftValue": "={{ String($json.ALERT_TRIGGERED).toLowerCase() }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        432,
+        -144
+      ],
+      "id": "a172c6fb-4d1e-4603-b1e5-66d90977ac97",
+      "name": "Evaluate Revenue Drop Threshold"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH daily_segment AS (\n    SELECT\n        ORDER_DATE,\n        SEGMENT,\n        SUM(AMOUNT) AS segment_revenue\n    FROM ANALYTICS.DBT_VMULAY.V_FCT_ORDERS_DEMO_SEGMENTED\n    GROUP BY ORDER_DATE, SEGMENT\n),\nranked_dates AS (\n    SELECT\n        ORDER_DATE,\n        ROW_NUMBER() OVER (ORDER BY ORDER_DATE DESC) AS rn\n    FROM (\n        SELECT DISTINCT ORDER_DATE\n        FROM ANALYTICS.DBT_VMULAY.V_FCT_ORDERS_DEMO_SEGMENTED\n    )\n),\ntoday_segment AS (\n    SELECT\n        d.SEGMENT,\n        d.segment_revenue AS today_revenue\n    FROM daily_segment d\n    JOIN ranked_dates r\n      ON d.ORDER_DATE = r.ORDER_DATE\n    WHERE r.rn = 1\n),\nbaseline_segment AS (\n    SELECT\n        d.SEGMENT,\n        AVG(d.segment_revenue) AS baseline_revenue\n    FROM daily_segment d\n    JOIN ranked_dates r\n      ON d.ORDER_DATE = r.ORDER_DATE\n    WHERE r.rn BETWEEN 2 AND 8\n    GROUP BY d.SEGMENT\n)\nSELECT\n    COALESCE(t.SEGMENT, b.SEGMENT) AS SEGMENT,\n    COALESCE(t.today_revenue, 0) AS today_revenue,\n    COALESCE(b.baseline_revenue, 0) AS baseline_revenue,\n    ROUND(COALESCE(t.today_revenue, 0) - COALESCE(b.baseline_revenue, 0), 2) AS delta,\n    ROUND(\n        (COALESCE(t.today_revenue, 0) - COALESCE(b.baseline_revenue, 0))\n        / NULLIF(COALESCE(b.baseline_revenue, 0), 0),\n        4\n    ) AS delta_pct\nFROM today_segment t\nFULL OUTER JOIN baseline_segment b\n    ON t.SEGMENT = b.SEGMENT\nORDER BY delta ASC;"
+      },
+      "type": "n8n-nodes-base.snowflake",
+      "typeVersion": 1,
+      "position": [
+        656,
+        -144
+      ],
+      "id": "c476e757-eebb-4829-9aa1-9b2702144bd4",
+      "name": "Fetch Segment-Level Revenue",
+      "credentials": {
+        "snowflake": {
+          "id": "uYJOMoG0l0oPFg0x",
+          "name": "Snowflake account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "vaishnavmulay2001@gmail.com",
+        "subject": "Revenue Drop Alert",
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1904,
+        -144
+      ],
+      "id": "cd3128c7-36c0-4669-904b-4f9bf9ac5afd",
+      "name": "Send Revenue Alert (Email)",
+      "webhookId": "4a9f6f1f-11b3-4f2a-8b25-05ee2482910b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "e0U6vTJCDRBaS2BB",
+          "name": "Gmail OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = $('Prepare AI Analysis Input').first()?.json || {};\nconst aiJson = items[0].json;\n\nlet aiText =\n  aiJson.output?.[0]?.content?.[0]?.text ??\n  aiJson.content?.[0]?.text ??\n  aiJson.choices?.[0]?.message?.content ??\n  aiJson.text ??\n  JSON.stringify(aiJson);\n\nif (typeof aiText === 'string' && aiText.trim().startsWith('{')) {\n  try {\n    const parsed = JSON.parse(aiText);\n    aiText = parsed.message || aiText;\n  } catch (e) {}\n}\n\nif (typeof aiText !== 'string') {\n  aiText = String(aiText);\n}\n\n// Clean escaped newlines\naiText = aiText.replace(/\\\\n/g, '\\n').trim();\n\n// Remove repeated alert header / key metrics if the model echoes them\naiText = aiText\n  .replace(/🚨\\s*Revenue Drop Alert[\\s\\S]*?AI Analysis\\s*/i, '')\n  .replace(/Revenue Drop Alert[\\s\\S]*?AI Analysis\\s*/i, '')\n  .trim();\n\n// Convert simple markdown-like lines into compact HTML\nconst lines = aiText.split('\\n').map(l => l.trim()).filter(Boolean);\n\nlet htmlParts = [];\nlet inList = false;\n\nfor (const line of lines) {\n  if (/^headline:/i.test(line)) {\n    if (inList) {\n      htmlParts.push('</ul>');\n      inList = false;\n    }\n    htmlParts.push(\n      `<p style=\"margin:0 0 8px 0;\"><strong>${line}</strong></p>`\n    );\n  } else if (/^explanation:/i.test(line)) {\n    if (inList) {\n      htmlParts.push('</ul>');\n      inList = false;\n    }\n    htmlParts.push(\n      `<p style=\"margin:0 0 8px 0;\">${line}</p>`\n    );\n  } else if (/^observations:/i.test(line)) {\n    if (inList) {\n      htmlParts.push('</ul>');\n    }\n    htmlParts.push(`<p style=\"margin:0 0 6px 0;\"><strong>Observations:</strong></p>`);\n    htmlParts.push('<ul style=\"margin:0 0 8px 18px; padding:0;\">');\n    inList = true;\n  } else if (/^- /.test(line)) {\n    if (!inList) {\n      htmlParts.push('<ul style=\"margin:0 0 8px 18px; padding:0;\">');\n      inList = true;\n    }\n    htmlParts.push(`<li style=\"margin:0 0 4px 0;\">${line.replace(/^- /, '')}</li>`);\n  } else {\n    if (inList) {\n      htmlParts.push('</ul>');\n      inList = false;\n    }\n    htmlParts.push(`<p style=\"margin:0 0 8px 0;\">${line}</p>`);\n  }\n}\n\nif (inList) {\n  htmlParts.push('</ul>');\n}\n\nfunction money(x) {\n  const n = Number(x);\n  if (Number.isNaN(n)) return '$0';\n  return `$${Math.round(n).toLocaleString()}`;\n}\n\nconst dropPct = Number(payload.drop_pct);\nconst dropPctDisplay = Number.isNaN(dropPct) ? '0.0' : (dropPct * 100).toFixed(1);\n\nconst message = `\n<div style=\"font-family: Arial, sans-serif; max-width: 560px; color: #222; line-height: 1.45;\">\n\n  <h2 style=\"color:#D32F2F; margin:0 0 8px 0;\">Revenue Drop Alert</h2>\n  <p style=\"margin:0 0 12px 0;\">A significant revenue decline has been detected.</p>\n\n  <table style=\"border-collapse: collapse; width: 100%; font-size: 14px; margin-bottom: 14px;\">\n    <tr>\n      <td style=\"padding: 4px 0; font-weight: bold; width: 170px;\">Date</td>\n      <td style=\"padding: 4px 0;\">${payload.latest_date || 'N/A'}</td>\n    </tr>\n    <tr>\n      <td style=\"padding: 4px 0; font-weight: bold;\">Today's Revenue</td>\n      <td style=\"padding: 4px 0;\">${money(payload.today_revenue)}</td>\n    </tr>\n    <tr>\n      <td style=\"padding: 4px 0; font-weight: bold;\">7-Day Average</td>\n      <td style=\"padding: 4px 0;\">${money(payload.avg_last_7_days)}</td>\n    </tr>\n    <tr>\n      <td style=\"padding: 4px 0; font-weight: bold;\">Revenue Change</td>\n      <td style=\"padding: 4px 0; color: ${dropPct < 0 ? '#D32F2F' : '#2E7D32'}; font-weight: bold;\">\n        ${dropPctDisplay}%\n      </td>\n    </tr>\n  </table>\n\n  <div style=\"border-top:1px solid #ddd; margin:10px 0 12px 0;\"></div>\n\n  <h3 style=\"margin:0 0 8px 0;\">AI Insights</h3>\n  <div style=\"background:#f7f7f7; border:1px solid #e5e5e5; border-radius:8px; padding:12px; font-size:14px;\">\n    ${htmlParts.join('')}\n  </div>\n\n  <p style=\"font-size:12px; color:#777; margin:12px 0 0 0;\">\n    Generated automatically via Snowflake, n8n, and AI.\n  </p>\n\n</div>\n`;\n\nreturn [{ json: { message } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -144
+      ],
+      "id": "aec1ec56-97c8-499a-b2fa-daa7fc4fcb02",
+      "name": "Format Executive Alert Message"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a business analyst assistant.\nExplain revenue anomalies clearly and briefly.\nUse only the numbers provided.\nDo not invent external causes like campaigns, outages, seasonality, or market changes.\nFocus on which segment contributed most to the decline and whether the issue is localized or broad-based.\nKeep the answer under 120 words."
+            },
+            {
+              "content": "=Analyze this revenue drop.\n\nLatest date: {{$json.latest_date}}\nToday's revenue: {{$json.today_revenue}}\n7-day average revenue: {{$json.avg_last_7_days}}\nDrop percent: {{$json.drop_pct}}\n\nSegment breakdown:\n{{$json.formatted_breakdown}}\n\nWrite a concise business alert in this exact format:\n\nHeadline: <one line>\n\nExplanation: <2-3 sentences, rounded numbers, plain English>\n\nObservations:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules:\n- Round percentages to 1 decimal place\n- Round currency values to whole numbers\n- Do not repeat raw decimals like 1942.857143\n- Do not mention corrupted or missing data\n- Be concise and business-friendly"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        1328,
+        -144
+      ],
+      "id": "6c3b2441-de80-47a8-b5e4-6af26df85c74",
+      "name": "Generate Root Cause Analysis",
+      "credentials": {
+        "openAiApi": {
+          "id": "4Cz8CUEPDiUWkdK0",
+          "name": "n8n free OpenAI API credits"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const anomaly = $('Fetch Daily Revenue Metrics').first().json;\nconst breakdown = items[0].json.breakdown || [];\n\nconst formattedBreakdown = breakdown.map(row => {\n  const segment = row.SEGMENT ?? row.segment ?? 'Unknown';\n  const todayRevenue = row.TODAY_REVENUE ?? row.today_revenue ?? 0;\n  const baselineRevenue = row.BASELINE_REVENUE ?? row.baseline_revenue ?? 0;\n  const delta = row.DELTA ?? row.delta ?? 0;\n  const deltaPct = row.DELTA_PCT ?? row.delta_pct ?? 0;\n\n  return `Segment: ${segment}, Today Revenue: ${todayRevenue}, Baseline Revenue: ${baselineRevenue}, Delta: ${delta}, Delta %: ${deltaPct}`;\n});\n\nreturn [\n  {\n    json: {\n      latest_date: anomaly.LATEST_DATE ?? anomaly.latest_date,\n      today_revenue: anomaly.TODAY_REVENUE ?? anomaly.today_revenue,\n      avg_last_7_days: anomaly.AVG_LAST_7_DAYS ?? anomaly.avg_last_7_days,\n      drop_pct: anomaly.DROP_PCT ?? anomaly.drop_pct,\n      alert_triggered: anomaly.ALERT_TRIGGERED ?? anomaly.alert_triggered,\n      breakdown: breakdown,\n      formatted_breakdown: formattedBreakdown.join('\\n')\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        -144
+      ],
+      "id": "b3eabc69-81c1-4dd4-83d3-3ff1004e3c36",
+      "name": "Prepare AI Analysis Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = items.map(item => item.json);\n\nreturn [\n  {\n    json: {\n      breakdown: rows\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -144
+      ],
+      "id": "798c3f48-d501-48e6-b1ac-992c3f50a360",
+      "name": "Format Segment Breakdown"
+    },
+    {
+      "parameters": {
+        "content": "Alert is triggered if revenue drops significantly compared to last 7 days",
+        "height": 144,
+        "width": 160
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        384,
+        -336
+      ],
+      "typeVersion": 1,
+      "id": "47f1175a-e0c1-4436-8db7-cd309421f2e6",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger (Test Run)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Daily Revenue Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Daily Revenue Metrics": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Revenue Drop Threshold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Revenue Drop Threshold": {
+      "main": [
+        [
+          {
+            "node": "Fetch Segment-Level Revenue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Segment-Level Revenue": {
+      "main": [
+        [
+          {
+            "node": "Format Segment Breakdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Executive Alert Message": {
+      "main": [
+        [
+          {
+            "node": "Send Revenue Alert (Email)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Root Cause Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Executive Alert Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare AI Analysis Input": {
+      "main": [
+        [
+          {
+            "node": "Generate Root Cause Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Segment Breakdown": {
+      "main": [
+        [
+          {
+            "node": "Prepare AI Analysis Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "a358fb4e-1f0e-4edc-9f1b-bbd844950625",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1228502d063f78bf9a6dee232e1328f009439fcb2722ca5902312b3bd8938dfc"
+  },
+  "id": "9LX1yWEBY79EYYtL",
+  "tags": []
+}
