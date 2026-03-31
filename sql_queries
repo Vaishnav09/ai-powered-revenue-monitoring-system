@@ -1,0 +1,96 @@
+-- =====================================================
+-- 1. REVENUE DROP DETECTION QUERY
+-- =====================================================
+
+WITH daily_revenue AS (
+    SELECT
+        ORDER_DATE,
+        SUM(AMOUNT) AS revenue
+    FROM ORDERS
+    GROUP BY ORDER_DATE
+),
+
+latest_date AS (
+    SELECT MAX(ORDER_DATE) AS latest_date
+    FROM daily_revenue
+),
+
+today_revenue AS (
+    SELECT
+        dr.ORDER_DATE,
+        dr.revenue
+    FROM daily_revenue dr
+    JOIN latest_date ld
+      ON dr.ORDER_DATE = ld.latest_date
+),
+
+last_7_days AS (
+    SELECT
+        dr.revenue
+    FROM daily_revenue dr
+    JOIN latest_date ld
+      ON dr.ORDER_DATE < ld.latest_date
+     AND dr.ORDER_DATE >= DATEADD(DAY, -7, ld.latest_date)
+),
+
+avg_7_days AS (
+    SELECT AVG(revenue) AS avg_revenue
+    FROM last_7_days
+)
+
+SELECT
+    t.ORDER_DATE AS latest_date,
+    t.revenue AS today_revenue,
+    a.avg_revenue AS avg_last_7_days,
+    ROUND((t.revenue - a.avg_revenue) / a.avg_revenue, 4) AS drop_pct,
+    CASE
+        WHEN (t.revenue - a.avg_revenue) / a.avg_revenue < -0.3 THEN TRUE
+        ELSE FALSE
+    END AS alert_triggered
+FROM today_revenue t
+CROSS JOIN avg_7_days a;
+
+-- =====================================================
+-- 2. SEGMENT-LEVEL ROOT CAUSE ANALYSIS
+-- =====================================================
+
+WITH latest_date AS (
+    SELECT MAX(ORDER_DATE) AS latest_date
+    FROM ORDERS
+),
+
+today_segment AS (
+    SELECT
+        SEGMENT,
+        SUM(AMOUNT) AS today_revenue
+    FROM ORDERS
+    WHERE ORDER_DATE = (SELECT latest_date FROM latest_date)
+    GROUP BY SEGMENT
+),
+
+baseline_segment AS (
+    SELECT
+        SEGMENT,
+        AVG(daily_rev) AS baseline_revenue
+    FROM (
+        SELECT
+            SEGMENT,
+            ORDER_DATE,
+            SUM(AMOUNT) AS daily_rev
+        FROM ORDERS
+        WHERE ORDER_DATE < (SELECT latest_date FROM latest_date)
+          AND ORDER_DATE >= DATEADD(DAY, -7, (SELECT latest_date FROM latest_date))
+        GROUP BY SEGMENT, ORDER_DATE
+    )
+    GROUP BY SEGMENT
+)
+
+SELECT
+    COALESCE(t.SEGMENT, b.SEGMENT) AS segment,
+    COALESCE(t.today_revenue, 0) AS today_revenue,
+    COALESCE(b.baseline_revenue, 0) AS baseline_revenue,
+    COALESCE(t.today_revenue, 0) - COALESCE(b.baseline_revenue, 0) AS delta
+FROM today_segment t
+FULL OUTER JOIN baseline_segment b
+ON t.SEGMENT = b.SEGMENT
+ORDER BY delta ASC;
